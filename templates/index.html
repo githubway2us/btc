@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en" class="dark:bg-gray-900 transition-colors duration-300">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC/USDT Trade Predictor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+    <!-- Header -->
+    <header class="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-6 shadow-lg">
+        <div class="container mx-auto px-4">
+            <h1 class="text-3xl font-bold text-center"><i class="fas fa-coins mr-2"></i>BTC/USDT Trade Predictor (4H)</h1>
+            <div class="flex justify-center mt-2">
+                <button id="theme-toggle" class="p-2 rounded-full bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="container mx-auto px-4 py-8">
+        {% if error %}
+            <div class="bg-red-500 text-white p-4 rounded-lg mb-4">{{ error }}</div>
+        {% else %}
+            <!-- Real-time Price and Chart -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <h3 class="text-xl font-semibold mb-4">ราคา BTC/USDT แบบเรียลไทม์</h3>
+                    <h2 id="realtime-price" class="text-4xl font-bold text-blue-600 dark:text-blue-400 animate-pulse">${{ latest_price|round(2) }}</h2>
+                    <p class="text-gray-600 dark:text-gray-400">วันที่และเวลา: {{ current_time }}</p>
+                </div>
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <canvas id="priceChart" height="100"></canvas>
+                </div>
+            </div>
+
+            <!-- Predictions -->
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
+                <h3 class="text-xl font-semibold mb-4">ผลการทาย 4 ครั้งในกรอบ 4 ชั่วโมง</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="bg-gray-200 dark:bg-gray-700">
+                            <tr>
+                                <th class="p-3">รอบ</th>
+                                <th class="p-3">คำแนะนำ</th>
+                                <th class="p-3">โอกาสสำเร็จ (%)</th>
+                                <th class="p-3">ราคาคาดการณ์</th>
+                                <th class="p-3">RSI</th>
+                                <th class="p-3">MA10</th>
+                                <th class="p-3">MA50</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for pred in predictions %}
+                            <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                                <td class="p-3">{{ pred.round }}</td>
+                                <td class="p-3 {{ 'text-green-600 dark:text-green-400' if pred.signal == 'Long' else 'text-red-600 dark:text-red-400' }}">{{ pred.signal }}</td>
+                                <td class="p-3">{{ pred.success_rate|round(2) }}</td>
+                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">{{ pred.rsi|round(2) }}</td>
+                                <td class="p-3">{{ pred.ma10|round(2) }}</td>
+                                <td class="p-3">{{ pred.ma50|round(2) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Past Predictions -->
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
+                <h3 class="text-xl font-semibold mb-4">ตรวจสอบการทายย้อนหลัง (ครบ 4 ชั่วโมง)</h3>
+                {% if past_predictions %}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="bg-gray-200 dark:bg-gray-700">
+                            <tr>
+                                <th class="p-3">เวลา</th>
+                                <th class="p-3">สัญญาณ</th>
+                                <th class="p-3">ราคาทาย</th>
+                                <th class="p-3">ราคาคาดการณ์</th>
+                                <th class="p-3">ราคาปัจจุบัน</th>
+                                <th class="p-3">ส่วนต่าง</th>
+                                <th class="p-3">สถานะ</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for pred in past_predictions %}
+                            <tr class="{{ 'bg-green-100 dark:bg-green-900' if pred.is_correct else 'bg-red-100 dark:bg-red-900' }} hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                                <td class="p-3">{{ pred.timestamp }}</td>
+                                <td class="p-3">{{ pred.signal }}</td>
+                                <td class="p-3">${{ pred.pred_price|round(2) }}</td>
+                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">${{ pred.current_price|round(2) }}</td>
+                                <td class="p-3">${{ pred.price_diff|round(2) }} ({{ pred.price_diff_percent|round(2) }}%)</td>
+                                <td class="p-3">{{ 'ถูกต้อง' if pred.is_correct else 'ผิดพลาด' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-gray-600 dark:text-gray-400">ไม่พบการทายที่ครบ 4 ชั่วโมง</p>
+                {% endif %}
+            </div>
+
+            <!-- Statistics -->
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
+                <h3 class="text-xl font-semibold mb-4">สถิติการทาย</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">จำนวนการทายทั้งหมด</p>
+                        <p class="text-2xl font-bold">{{ stats.total }} ครั้ง</p>
+                    </div>
+                    <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">จำนวน Long</p>
+                        <p class="text-2xl font-bold">{{ stats.long_count }} ครั้ง ({{ (stats.long_count / stats.total * 100)|round(2) if stats.total > 0 else 0 }}%)</p>
+                    </div>
+                    <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">จำนวน Short</p>
+                        <p class="text-2xl font-bold">{{ stats.short_count }} ครั้ง ({{ (stats.short_count / stats.total * 100)|round(2) if stats.total > 0 else 0 }}%)</p>
+                    </div>
+                    <div class="bg-gray-100 dark:bg-gray-700 p-4 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">โอกาสสำเร็จเฉลี่ย</p>
+                        <p class="text-2xl font-bold">{{ stats.avg_success_rate|round(2) }}%</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Predictions -->
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg mb-8">
+                <h3 class="text-xl font-semibold mb-4">การทายล่าสุด 5 รายการ</h3>
+                {% if stats.recent %}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="bg-gray-200 dark:bg-gray-700">
+                            <tr>
+                                <th class="p-3">เวลา</th>
+                                <th class="p-3">ราคา</th>
+                                <th class="p-3">สัญญาณ</th>
+                                <th class="p-3">ราคาคาดการณ์</th>
+                                <th class="p-3">โอกาสสำเร็จ (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for pred in stats.recent %}
+                            <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                                <td class="p-3">{{ pred.timestamp }}</td>
+                                <td class="p-3">${{ pred.price|round(2) }}</td>
+                                <td class="p-3">{{ pred.signal }}</td>
+                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">{{ pred.success_rate|round(2) }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-gray-600 dark:text-gray-400">ยังไม่มีประวัติการทาย</p>
+                {% endif %}
+            </div>
+
+            <!-- Chat Section -->
+            <div class="bg-gray-900 p-6 rounded-lg shadow-lg">
+                <h3 class="text-xl font-semibold mb-4 text-white">ห้องแชท</h3>
+                <!-- Chat Messages -->
+                <div id="chat-box" class="bg-black p-4 rounded-lg h-64 overflow-y-auto mb-4">
+                    {% for msg in messages %}
+                    <div class="mb-2">
+                        <span class="text-gray-400 text-sm">[{{ msg.timestamp.strftime('%H:%M:%S') }}]</span>
+                        <span class="font-bold" style="color: {{ msg.color }}">{{ msg.username }}</span>:
+                        <span class="text-gray-200">{{ msg.message }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                <!-- Chat Form -->
+                <form id="chat-form" class="flex gap-2">
+                    <input type="text" id="username" name="username" placeholder="ชื่อผู้ใช้" class="p-2 rounded-lg bg-gray-800 text-white border-none focus:ring-2 focus:ring-blue-500" required>
+                    <input type="text" id="message" name="message" placeholder="ข้อความ" class="flex-1 p-2 rounded-lg bg-gray-800 text-white border-none focus:ring-2 focus:ring-blue-500" required>
+                    <button type="submit" class="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">ส่ง</button>
+                </form>
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-center py-4 mt-8">
+        <p>© 2025 BTC/USDT Trade Predictor. Powered by คัมภีร์สายกระบี่คริปโต.</p>
+    </footer>
+
+    <!-- JavaScript -->
+    <script>
+        // WebSocket สำหรับราคาเรียลไทม์
+        const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.k && data.k.c) {
+                const price = parseFloat(data.k.c).toFixed(2);
+                document.getElementById('realtime-price').innerText = `$${price}`;
+            }
+        };
+
+        // Chart.js สำหรับกราฟราคา
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        const priceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'BTC/USDT Price',
+                    data: [],
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    x: { display: true, title: { display: true, text: 'Time' } },
+                    y: { display: true, title: { display: true, text: 'Price (USDT)' } }
+                }
+            }
+        });
+
+        // อัปเดตกราฟ
+        function updateChart() {
+            fetch('/price_data')
+                .then(response => response.json())
+                .then(data => {
+                    priceChart.data.labels = data.map(d => d.timestamp);
+                    priceChart.data.datasets[0].data = data.map(d => d.price);
+                    priceChart.update();
+                });
+        }
+        setInterval(updateChart, 60000);
+        updateChart();
+
+        // Dark Mode Toggle
+        const toggleButton = document.getElementById('theme-toggle');
+        toggleButton.addEventListener('click', () => {
+            document.documentElement.classList.toggle('dark');
+            toggleButton.innerHTML = document.documentElement.classList.contains('dark')
+                ? '<i class="fas fa-sun"></i>'
+                : '<i class="fas fa-moon"></i>';
+        });
+
+        if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+            toggleButton.innerHTML = '<i class="fas fa-sun"></i>';
+        }
+
+        // ส่งข้อความแชท
+        document.getElementById('chat-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const message = document.getElementById('message').value;
+            fetch('/send_message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `username=${encodeURIComponent(username)}&message=${encodeURIComponent(message)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    // รีเฟรชหน้าเพื่อแสดงข้อความใหม่
+                    window.location.reload();
+                } else {
+                    alert(data.message);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
