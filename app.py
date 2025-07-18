@@ -336,8 +336,8 @@ if __name__ == "__main__":
     
     twm.start_kline_socket(callback=handle_socket_message, symbol='BTCUSDT', interval='1m')
     
-    # รัน Flask
-    app.run(debug=True)
+    # รัน Flask บน host 0.0.0.0
+    app.run(host='0.0.0.0', port=5000, debug=True)
     
     # หยุด WebSocket
     twm.stop()
