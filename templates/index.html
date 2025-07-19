@@ -6,8 +6,13 @@
     <title>BTC/USDT Trade Predictor</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.0"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <style>
+        .chat-box { height: 300px; overflow-y: auto; }
+        .alert { background-color: #f8d7da; padding: 10px; border-radius: 8px; }
+    </style>
 </head>
 <body class="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
     <!-- Header -->
@@ -25,7 +30,7 @@
     <!-- Main Content -->
     <div class="container mx-auto px-4 py-8">
         {% if error %}
-            <div class="bg-red-500 text-white p-4 rounded-lg mb-4">{{ error }}</div>
+            <div class="alert bg-red-500 text-white p-4 rounded-lg mb-4">{{ error }}</div>
         {% else %}
             <!-- Real-time Price and Chart -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -48,8 +53,11 @@
                             <tr>
                                 <th class="p-3">รอบ</th>
                                 <th class="p-3">คำแนะนำ</th>
+                                <th class="p-3">ML คำแนะนำ</th>
                                 <th class="p-3">โอกาสสำเร็จ (%)</th>
                                 <th class="p-3">ราคาคาดการณ์</th>
+                                <th class="p-3">Stop Loss</th>
+                                <th class="p-3">Take Profit</th>
                                 <th class="p-3">RSI</th>
                                 <th class="p-3">MA10</th>
                                 <th class="p-3">MA50</th>
@@ -60,8 +68,11 @@
                             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                                 <td class="p-3">{{ pred.round }}</td>
                                 <td class="p-3 {{ 'text-green-600 dark:text-green-400' if pred.signal == 'Long' else 'text-red-600 dark:text-red-400' }}">{{ pred.signal }}</td>
+                                <td class="p-3 {{ 'text-green-600 dark:text-green-400' if pred.ml_signal == 'Long' else 'text-red-600 dark:text-red-400' }}">{{ pred.ml_signal }}</td>
                                 <td class="p-3">{{ pred.success_rate|round(2) }}</td>
-                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">${{ pred.predicted_price|round(2) }}</td>
+                                <td class="p-3">${{ pred.stop_loss|round(2) }}</td>
+                                <td class="p-3">${{ pred.take_profit|round(2) }}</td>
                                 <td class="p-3">{{ pred.rsi|round(2) }}</td>
                                 <td class="p-3">{{ pred.ma10|round(2) }}</td>
                                 <td class="p-3">{{ pred.ma50|round(2) }}</td>
@@ -87,6 +98,8 @@
                                 <th class="p-3">ราคาปัจจุบัน</th>
                                 <th class="p-3">ส่วนต่าง</th>
                                 <th class="p-3">สถานะ</th>
+                                <th class="p-3">Stop Loss Hit</th>
+                                <th class="p-3">Take Profit Hit</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -95,10 +108,12 @@
                                 <td class="p-3">{{ pred.timestamp }}</td>
                                 <td class="p-3">{{ pred.signal }}</td>
                                 <td class="p-3">${{ pred.pred_price|round(2) }}</td>
-                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">${{ pred.predicted_price|round(2) }}</td>
                                 <td class="p-3">${{ pred.current_price|round(2) }}</td>
                                 <td class="p-3">${{ pred.price_diff|round(2) }} ({{ pred.price_diff_percent|round(2) }}%)</td>
                                 <td class="p-3">{{ 'ถูกต้อง' if pred.is_correct else 'ผิดพลาด' }}</td>
+                                <td class="p-3">{{ 'Yes' if pred.hit_stop_loss else 'No' }}</td>
+                                <td class="p-3">{{ 'Yes' if pred.hit_take_profit else 'No' }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
@@ -153,7 +168,7 @@
                                 <td class="p-3">{{ pred.timestamp }}</td>
                                 <td class="p-3">${{ pred.price|round(2) }}</td>
                                 <td class="p-3">{{ pred.signal }}</td>
-                                <td class="p-3">{{ '$' ~ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
+                                <td class="p-3">${{ pred.predicted_price|round(2) if pred.predicted_price != 'N/A' else 'N/A' }}</td>
                                 <td class="p-3">{{ pred.success_rate|round(2) }}</td>
                             </tr>
                             {% endfor %}
@@ -168,17 +183,15 @@
             <!-- Chat Section -->
             <div class="bg-gray-900 p-6 rounded-lg shadow-lg">
                 <h3 class="text-xl font-semibold mb-4 text-white">ห้องแชท</h3>
-                <!-- Chat Messages -->
-                <div id="chat-box" class="bg-black p-4 rounded-lg h-64 overflow-y-auto mb-4">
-                    {% for msg in messages %}
-                    <div class="mb-2">
-                        <span class="text-gray-400 text-sm">[{{ msg.timestamp.strftime('%H:%M:%S') }}]</span>
-                        <span class="font-bold" style="color: {{ msg.color }}">{{ msg.username }}</span>:
-                        <span class="text-gray-200">{{ msg.message }}</span>
+                    <div id="chat-box" class="bg-black p-4 rounded-lg h-64 overflow-y-auto mb-4">
+                        {% for msg in messages %}
+                        <div class="mb-2">
+                            <span class="text-gray-400 text-sm">[{{ msg.timestamp }}]</span>
+                            <span class="font-bold" style="color: {{ msg.color }}">{{ msg.username }}</span>:
+                            <span class="text-gray-200">{{ msg.message }}</span>
+                        </div>
+                        {% endfor %}
                     </div>
-                    {% endfor %}
-                </div>
-                <!-- Chat Form -->
                 <form id="chat-form" class="flex gap-2">
                     <input type="text" id="username" name="username" placeholder="ชื่อผู้ใช้" class="p-2 rounded-lg bg-gray-800 text-white border-none focus:ring-2 focus:ring-blue-500" required>
                     <input type="text" id="message" name="message" placeholder="ข้อความ" class="flex-1 p-2 rounded-lg bg-gray-800 text-white border-none focus:ring-2 focus:ring-blue-500" required>
@@ -196,13 +209,27 @@
     <!-- JavaScript -->
     <script>
         // WebSocket สำหรับราคาเรียลไทม์
-        const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
+        let ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
         ws.onmessage = function(event) {
             const data = JSON.parse(event.data);
             if (data.k && data.k.c) {
                 const price = parseFloat(data.k.c).toFixed(2);
                 document.getElementById('realtime-price').innerText = `$${price}`;
+                fetch('/price_data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ timestamp: new Date().toISOString(), price: price })
+                });
             }
+        };
+        ws.onclose = function() {
+            console.log('WebSocket closed, reconnecting...');
+            setTimeout(() => {
+                ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_1m');
+            }, 5000);
+        };
+        ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
         };
 
         // Chart.js สำหรับกราฟราคา
@@ -210,21 +237,42 @@
         const priceChart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: [],
-                datasets: [{
-                    label: 'BTC/USDT Price',
-                    data: [],
-                    borderColor: '#3b82f6',
-                    backgroundColor: 'rgba(59, 130, 246, 0.2)',
-                    fill: true,
-                    tension: 0.4
-                }]
+                datasets: [
+                    {
+                        label: 'BTC/USDT Price',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                        fill: true,
+                        tension: 0.4
+                    },
+                    {
+                        label: 'MA10',
+                        data: [],
+                        borderColor: '#10b981',
+                        fill: false,
+                        tension: 0.4
+                    },
+                    {
+                        label: 'MA50',
+                        data: [],
+                        borderColor: '#f59e0b',
+                        fill: false,
+                        tension: 0.4
+                    }
+                ]
             },
             options: {
                 responsive: true,
                 scales: {
-                    x: { display: true, title: { display: true, text: 'Time' } },
-                    y: { display: true, title: { display: true, text: 'Price (USDT)' } }
+                    x: {
+                        type: 'time',
+                        time: { unit: 'minute' },
+                        title: { display: true, text: 'Time' }
+                    },
+                    y: {
+                        title: { display: true, text: 'Price (USDT)' }
+                    }
                 }
             }
         });
@@ -234,13 +282,36 @@
             fetch('/price_data')
                 .then(response => response.json())
                 .then(data => {
-                    priceChart.data.labels = data.map(d => d.timestamp);
-                    priceChart.data.datasets[0].data = data.map(d => d.price);
+                    priceChart.data.datasets[0].data = data.map(d => ({ x: d.timestamp, y: d.price }));
+                    // สมมติว่า backend ส่ง MA10 และ MA50 มาด้วย (ต้องเพิ่มใน /price_data)
+                    priceChart.data.datasets[1].data = data.map(d => ({ x: d.timestamp, y: d.ma10 || null }));
+                    priceChart.data.datasets[2].data = data.map(d => ({ x: d.timestamp, y: d.ma50 || null }));
                     priceChart.update();
-                });
+                })
+                .catch(error => console.error('Error updating chart:', error));
         }
-        setInterval(updateChart, 60000);
+        setInterval(updateChart, 30000);
         updateChart();
+
+        // อัปเดตแชท
+        function updateChat() {
+            fetch('/get_messages')
+                .then(response => response.json())
+                .then(data => {
+                    const chatBox = document.getElementById('chat-box');
+                    chatBox.innerHTML = '';
+                    data.forEach(msg => {
+                        const div = document.createElement('div');
+                        div.className = 'mb-2';
+                        div.innerHTML = `<span class="text-gray-400 text-sm">[${msg.timestamp.slice(-8)}]</span> <span class="font-bold" style="color: ${msg.color}">${msg.username}</span>: <span class="text-gray-200">${msg.message}</span>`;
+                        chatBox.appendChild(div);
+                    });
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                })
+                .catch(error => console.error('Error updating chat:', error));
+        }
+        setInterval(updateChat, 5000);
+        updateChat();
 
         // Dark Mode Toggle
         const toggleButton = document.getElementById('theme-toggle');
@@ -269,12 +340,13 @@
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
-                    // รีเฟรชหน้าเพื่อแสดงข้อความใหม่
-                    window.location.reload();
+                    document.getElementById('message').value = '';
+                    updateChat();
                 } else {
                     alert(data.message);
                 }
-            });
+            })
+            .catch(error => console.error('Error sending message:', error));
         });
     </script>
 </body>

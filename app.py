@@ -2,14 +2,21 @@ import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import os
+import sqlite3
 from flask import Flask, render_template, jsonify, request
 from binance import ThreadedWebsocketManager
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from html import escape
 
 app = Flask(__name__)
-
-# เก็บข้อมูลราคาสำหรับกราฟ
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+limiter.init_app(app)
 price_data = []
+ml_model = None
 
 # ฟังก์ชันคำนวณ RSI
 def calculate_rsi(data, periods=14):
@@ -26,25 +33,84 @@ def calculate_ma(data, short_period=10, long_period=50):
     ma_long = data['close'].rolling(window=long_period).mean()
     return ma_short, ma_long
 
+# ฟังก์ชันคำนวณ Bollinger Bands
+def calculate_bollinger_bands(data, period=20, std_dev=2):
+    sma = data['close'].rolling(window=period).mean()
+    rolling_std = data['close'].rolling(window=period).std()
+    upper_band = sma + (rolling_std * std_dev)
+    lower_band = sma - (rolling_std * std_dev)
+    return sma, upper_band, lower_band
+
+# ฟังก์ชันคำนวณ ATR
+def calculate_atr(data, period=14):
+    high_low = data['high'] - data['low']
+    high_close = np.abs(data['high'] - data['close'].shift())
+    low_close = np.abs(data['low'] - data['close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    return atr
+
 # ฟังก์ชันคำนวณความผันผวน
 def calculate_volatility(data):
     returns = data['close'].pct_change().dropna()
     volatility = returns.std() * 100
     return volatility
 
+# ฟังก์ชันคำนวณขนาดตำแหน่ง
+def calculate_position_size(account_balance, risk_percentage, stop_loss_price, entry_price):
+    risk_per_trade = account_balance * (risk_percentage / 100)
+    risk_per_unit = abs(entry_price - stop_loss_price)
+    position_size = risk_per_trade / risk_per_unit if risk_per_unit != 0 else 0
+    return position_size
+
+# ฟังก์ชันฝึกโมเดล Machine Learning
+def train_ml_model(data):
+    features = ['RSI', 'MA10', 'MA50', 'volume', 'Upper_BB', 'Lower_BB', 'ATR']
+    target = (data['close'].shift(-1) > data['close']).astype(int)  # 1 = Long, 0 = Short
+    
+    X = data[features].dropna()
+    y = target[X.index]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    accuracy = accuracy_score(y_test, model.predict(X_test))
+    print(f"Model Accuracy: {accuracy:.2f}")
+    
+    return model
+
+# ฟังก์ชันทำนายด้วย ML
+def predict_with_ml(model, latest_data):
+    features = ['RSI', 'MA10', 'MA50', 'volume', 'Upper_BB', 'Lower_BB', 'ATR']
+    X = latest_data[features].iloc[-1:].values
+    prediction = model.predict(X)[0]
+    return 'Long' if prediction == 1 else 'Short'
+
 # ฟังก์ชันวิเคราะห์สัญญาณและทำนายราคา
-def trading_signal(data, random_factor=0.1):
+def trading_signal(data, random_factor=0.05):
     latest = data.iloc[-1]
     rsi = latest['RSI']
     ma10 = latest['MA10']
     ma50 = latest['MA50']
     current_price = latest['close']
-    
+    upper_band = latest['Upper_BB']
+    lower_band = latest['Lower_BB']
+    atr = latest['ATR']
+    volume = latest['volume']
+    avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
+
     rsi_signal = None
     ma_signal = None
+    bb_signal = None
+    volume_signal = None
     rsi_success_rate = 0
     ma_success_rate = 0
-    
+    bb_success_rate = 0
+    volume_success_rate = 0
+
+    # RSI
     if rsi < 30:
         rsi_signal = 'Long'
         rsi_success_rate = 75
@@ -54,7 +120,8 @@ def trading_signal(data, random_factor=0.1):
     else:
         rsi_signal = 'Neutral'
         rsi_success_rate = 50
-    
+
+    # Moving Averages
     if ma10 > ma50 and data.iloc[-2]['MA10'] <= data.iloc[-2]['MA50']:
         ma_signal = 'Long'
         ma_success_rate = 65
@@ -64,35 +131,54 @@ def trading_signal(data, random_factor=0.1):
     else:
         ma_signal = 'Neutral'
         ma_success_rate = 50
-    
-    if rsi_signal == ma_signal and rsi_signal != 'Neutral':
-        signal = rsi_signal
-        success_rate = (rsi_success_rate * 0.4 + ma_success_rate * 0.6)
-    elif rsi_signal != 'Neutral':
-        signal = rsi_signal
-        success_rate = rsi_success_rate * 0.7
-    elif ma_signal != 'Neutral':
-        signal = ma_signal
-        success_rate = ma_success_rate * 0.7
+
+    # Bollinger Bands
+    if current_price < lower_band:
+        bb_signal = 'Long'
+        bb_success_rate = 70
+    elif current_price > upper_band:
+        bb_signal = 'Short'
+        bb_success_rate = 65
     else:
-        signal = 'Neutral'
+        bb_signal = 'Neutral'
+        bb_success_rate = 50
+
+    # Volume Analysis
+    if volume > avg_volume * 1.5:
+        volume_signal = 'Strong'
+        volume_success_rate = 60
+    else:
+        volume_signal = 'Neutral'
+        volume_success_rate = 50
+
+    # รวมสัญญาณ
+    signals = [rsi_signal, ma_signal, bb_signal]
+    valid_signals = [s for s in signals if s != 'Neutral']
+    if len(set(valid_signals)) == 1 and valid_signals:
+        signal = valid_signals[0]
+        success_rate = (rsi_success_rate * 0.3 + ma_success_rate * 0.3 + bb_success_rate * 0.3 + volume_success_rate * 0.1)
+    elif valid_signals:
+        signal = max(set(valid_signals), key=valid_signals.count)
+        success_rate = (rsi_success_rate * 0.4 + ma_success_rate * 0.4 + bb_success_rate * 0.2) if signal != 'Neutral' else 50
+    else:
+        signal = np.random.choice(['Long', 'Short'])
         success_rate = 50
-    
+
+    # ปรับความผันผวนด้วย ATR
     random_adjustment = np.random.uniform(-random_factor * success_rate, random_factor * success_rate)
     success_rate = min(max(success_rate + random_adjustment, 0), 100)
-    
-    if signal == 'Neutral':
-        signal = np.random.choice(['Long', 'Short'])
-        success_rate = 50 + random_adjustment
-    
-    volatility = calculate_volatility(data)
-    random_factor_price = np.random.uniform(0.5, 1.5)
+
+    # ทำนายราคาด้วย ATR
     if signal == 'Long':
-        predicted_price = current_price * (1 + (volatility / 100) * random_factor_price)
+        predicted_price = current_price + (atr * 1.5)
+        stop_loss = current_price - (atr * 1)
+        take_profit = current_price + (atr * 2)
     else:
-        predicted_price = current_price * (1 - (volatility / 100) * random_factor_price)
-    
-    return signal, success_rate, rsi, ma10, ma50, predicted_price
+        predicted_price = current_price - (atr * 1.5)
+        stop_loss = current_price + (atr * 1)
+        take_profit = current_price - (atr * 2)
+
+    return signal, success_rate, rsi, ma10, ma50, predicted_price, stop_loss, take_profit
 
 # ดึงข้อมูล OHLCV จาก Binance
 def fetch_realtime_data():
@@ -105,41 +191,45 @@ def fetch_realtime_data():
         
         data['RSI'] = calculate_rsi(data)
         data['MA10'], data['MA50'] = calculate_ma(data)
+        data['SMA20'], data['Upper_BB'], data['Lower_BB'] = calculate_bollinger_bands(data)
+        data['ATR'] = calculate_atr(data)
         data = data.dropna()
+        
+        global ml_model
+        if ml_model is None:
+            ml_model = train_ml_model(data)
         
         return data
     except Exception as e:
         print(f"Error fetching data: {e}")
         return None
 
+# เริ่มต้นฐานข้อมูล SQLite
+def init_db():
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS predictions
+                 (timestamp TEXT, price REAL, rsi REAL, ma10 REAL, ma50 REAL, signal TEXT, 
+                 success_rate REAL, predicted_price REAL, stop_loss REAL, take_profit REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS messages
+                 (timestamp TEXT, username TEXT, message TEXT)''')
+    conn.commit()
+    conn.close()
+
 # บันทึกการทาย
-def save_prediction(timestamp, price, rsi, ma10, ma50, signal, success_rate, predicted_price):
-    data = {
-        'timestamp': [timestamp],
-        'price': [price],
-        'RSI': [rsi],
-        'MA10': [ma10],
-        'MA50': [ma50],
-        'signal': [signal],
-        'success_rate': [success_rate],
-        'predicted_price': [predicted_price]
-    }
-    df = pd.DataFrame(data)
-    file_exists = os.path.isfile('predictions.csv')
-    df.to_csv('predictions.csv', mode='a', header=not file_exists, index=False)
+def save_prediction(timestamp, price, rsi, ma10, ma50, signal, success_rate, predicted_price, stop_loss, take_profit):
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO predictions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (timestamp, price, rsi, ma10, ma50, signal, success_rate, predicted_price, stop_loss, take_profit))
+    conn.commit()
+    conn.close()
 
 # ตรวจสอบการทายย้อนหลัง
 def check_past_predictions(current_price):
-    if not os.path.isfile('predictions.csv'):
-        return []
-    
-    try:
-        df = pd.read_csv('predictions.csv')
-    except pd.errors.ParserError:
-        df = pd.read_csv('predictions.csv', names=['timestamp', 'price', 'RSI', 'MA10', 'MA50', 'signal', 'success_rate', 'predicted_price'], skiprows=1)
-    
-    if 'predicted_price' not in df.columns:
-        df['predicted_price'] = np.nan
+    conn = sqlite3.connect('predictions.db')
+    df = pd.read_sql_query("SELECT * FROM predictions", conn)
+    conn.close()
     
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp'])
@@ -156,13 +246,32 @@ def check_past_predictions(current_price):
         pred_price = row['price']
         signal = row['signal']
         timestamp = row['timestamp']
-        predicted_price = row.get('predicted_price', np.nan)
+        predicted_price = row['predicted_price']
+        stop_loss = row['stop_loss']
+        take_profit = row['take_profit']
         
         is_correct = False
-        if signal == 'Long' and current_price > pred_price:
-            is_correct = True
-        elif signal == 'Short' and current_price < pred_price:
-            is_correct = True
+        hit_stop_loss = False
+        hit_take_profit = False
+        
+        if signal == 'Long':
+            if current_price >= take_profit:
+                hit_take_profit = True
+                is_correct = True
+            elif current_price <= stop_loss:
+                hit_stop_loss = True
+                is_correct = False
+            elif current_price > pred_price:
+                is_correct = True
+        else:  # Short
+            if current_price <= take_profit:
+                hit_take_profit = True
+                is_correct = True
+            elif current_price >= stop_loss:
+                hit_stop_loss = True
+                is_correct = False
+            elif current_price < pred_price:
+                is_correct = True
         
         price_diff = current_price - pred_price
         price_diff_percent = (price_diff / pred_price) * 100
@@ -175,23 +284,18 @@ def check_past_predictions(current_price):
             'price_diff': price_diff,
             'price_diff_percent': price_diff_percent,
             'is_correct': is_correct,
-            'predicted_price': predicted_price if not np.isnan(predicted_price) else 'N/A'
+            'hit_stop_loss': hit_stop_loss,
+            'hit_take_profit': hit_take_profit,
+            'predicted_price': predicted_price
         })
     
     return results
 
 # วิเคราะห์สถิติ
 def analyze_statistics():
-    if not os.path.isfile('predictions.csv'):
-        return {'total': 0, 'long_count': 0, 'short_count': 0, 'avg_success_rate': 0, 'recent': []}
-    
-    try:
-        df = pd.read_csv('predictions.csv')
-    except pd.errors.ParserError:
-        df = pd.read_csv('predictions.csv', names=['timestamp', 'price', 'RSI', 'MA10', 'MA50', 'signal', 'success_rate', 'predicted_price'], skiprows=1)
-    
-    if 'predicted_price' not in df.columns:
-        df['predicted_price'] = np.nan
+    conn = sqlite3.connect('predictions.db')
+    df = pd.read_sql_query("SELECT * FROM predictions", conn)
+    conn.close()
     
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp'])
@@ -203,7 +307,7 @@ def analyze_statistics():
     recent = df.tail(5)[['timestamp', 'price', 'signal', 'success_rate', 'predicted_price']].to_dict('records')
     
     for pred in recent:
-        pred['predicted_price'] = pred['predicted_price'] if not np.isnan(pred['predicted_price']) else 'N/A'
+        pred['predicted_price'] = pred['predicted_price'] if not pd.isna(pred['predicted_price']) else 'N/A'
     
     return {
         'total': total,
@@ -216,27 +320,25 @@ def analyze_statistics():
 # บันทึกข้อความแชท
 def save_message(username, message):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    data = {
-        'timestamp': [timestamp],
-        'username': [username],
-        'message': [message]
-    }
-    df = pd.DataFrame(data)
-    file_exists = os.path.isfile('messages.csv')
-    df.to_csv('messages.csv', mode='a', header=not file_exists, index=False)
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO messages VALUES (?, ?, ?)''', (timestamp, username, message))
+    conn.commit()
+    conn.close()
 
 # อ่านข้อความแชท
 def get_messages():
-    if not os.path.isfile('messages.csv'):
-        return []
+    conn = sqlite3.connect('predictions.db')
+    df = pd.read_sql_query("SELECT * FROM messages ORDER BY timestamp DESC LIMIT 20", conn)
+    conn.close()
     
-    df = pd.read_csv('messages.csv')
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp'])
-    messages = df.tail(20)[['timestamp', 'username', 'message']].to_dict('records')
+    messages = df[['timestamp', 'username', 'message']].to_dict('records')
     
-    # สร้างสีสำหรับชื่อผู้ใช้
     for msg in messages:
+        # แปลง timestamp เป็นสตริงในรูปแบบ HH:MM:SS
+        msg['timestamp'] = msg['timestamp'].strftime('%H:%M:%S')
         msg['color'] = f"hsl({hash(msg['username']) % 360}, 70%, 70%)"
     
     return messages
@@ -253,16 +355,23 @@ def hash(string):
 def get_price_data():
     return jsonify(price_data[-50:])
 
+# ดึงข้อความแชท
+@app.route('/get_messages')
+def get_messages_route():
+    return jsonify(get_messages())
+
 # ส่งข้อความ
 @app.route('/send_message', methods=['POST'])
+@limiter.limit("10 per minute")
 def send_message():
-    username = request.form.get('username', 'Anonymous')
-    message = request.form.get('message', '')
-    if username and message:
+    username = escape(request.form.get('username', 'Anonymous'))
+    message = escape(request.form.get('message', ''))
+    if username and message and len(username) <= 50 and len(message) <= 500:
         save_message(username, message)
         return jsonify({'status': 'success'})
-    return jsonify({'status': 'error', 'message': 'Username and message required'}), 400
+    return jsonify({'status': 'error', 'message': 'Invalid input'}), 400
 
+# อัปเดตการทำนาย
 @app.route('/update')
 def update():
     data = fetch_realtime_data()
@@ -270,9 +379,9 @@ def update():
         return {"error": "Failed to fetch data"}, 500
     latest_price = data['close'].iloc[-1]
     for i in range(4):
-        signal, success_rate, rsi, ma10, ma50, predicted_price = trading_signal(data)
+        signal, success_rate, rsi, ma10, ma50, predicted_price, stop_loss, take_profit = trading_signal(data)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        save_prediction(timestamp, latest_price, rsi, ma10, ma50, signal, success_rate, predicted_price)
+        save_prediction(timestamp, latest_price, rsi, ma10, ma50, signal, success_rate, predicted_price, stop_loss, take_profit)
     return {"status": "Predictions updated"}, 200
 
 # เส้นทางหน้าเว็บหลัก
@@ -285,29 +394,27 @@ def index():
     latest_price = data['close'].iloc[-1]
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    # ทำนาย 4 ครั้ง
     predictions = []
     for i in range(4):
-        signal, success_rate, rsi, ma10, ma50, predicted_price = trading_signal(data, random_factor=0.1)
+        signal, success_rate, rsi, ma10, ma50, predicted_price, stop_loss, take_profit = trading_signal(data)
+        ml_signal = predict_with_ml(ml_model, data)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         predictions.append({
             'round': i + 1,
             'signal': signal,
+            'ml_signal': ml_signal,
             'success_rate': success_rate,
             'rsi': rsi,
             'ma10': ma10,
             'ma50': ma50,
-            'predicted_price': predicted_price
+            'predicted_price': predicted_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit
         })
-        save_prediction(timestamp, latest_price, rsi, ma10, ma50, signal, success_rate, predicted_price)
+        save_prediction(timestamp, latest_price, rsi, ma10, ma50, signal, success_rate, predicted_price, stop_loss, take_profit)
     
-    # ตรวจสอบการทายย้อนหลัง
     past_predictions = check_past_predictions(latest_price)
-    
-    # วิเคราะห์สถิติ
     stats = analyze_statistics()
-    
-    # ดึงข้อความแชท
     messages = get_messages()
     
     return render_template(
@@ -320,8 +427,8 @@ def index():
         messages=messages
     )
 
-if __name__ == "__main__":
-    # เริ่ม WebSocket
+# เริ่มต้น WebSocket
+def init_websocket():
     twm = ThreadedWebsocketManager()
     twm.start()
     
@@ -335,9 +442,10 @@ if __name__ == "__main__":
             print(f"WebSocket Price Update: ${price}")
     
     twm.start_kline_socket(callback=handle_socket_message, symbol='BTCUSDT', interval='1m')
-    
-    # รัน Flask บน host 0.0.0.0
+    return twm
+
+if __name__ == "__main__":
+    init_db()
+    twm = init_websocket()
     app.run(host='0.0.0.0', port=5000, debug=True)
-    
-    # หยุด WebSocket
     twm.stop()
